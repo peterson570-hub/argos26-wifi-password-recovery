@@ -62,6 +62,7 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
               <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
               <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
               <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
@@ -99,6 +100,9 @@ jobs:
           import android.graphics.Color
           import android.graphics.Typeface
           import android.net.wifi.WifiManager
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import java.net.Inet4Address
           import android.os.Build
           import android.os.Bundle
           import android.os.Handler
@@ -259,6 +263,22 @@ jobs:
                   }
                   intro.addView(settingsBtn, lp(t = 8))
 
+                  val connectionCard = card()
+                  connectionCard.addView(tv("Comprovação de conexão", 17f, Brand.NAVY, true))
+                  connectionCard.addView(
+                      tv(
+                          "Depois de conectar o celular a uma rede Wi-Fi, verifique aqui o estado da conexão e o IP local recebido pelo aparelho.",
+                          12f, Brand.MUTED
+                      ), lp(t = 5)
+                  )
+                  val connectionResult = tv("Conexão ainda não verificada.", 14f, Brand.NAVY, true)
+                  connectionCard.addView(connectionResult, lp(t = 8))
+                  connectionCard.addView(
+                      actionButton("VERIFICAR ACESSO E ENDEREÇO IP") {
+                          verifyWifiConnection(connectionResult)
+                      }, lp(t = 10)
+                  )
+
                   val status = tv(
                       if (networks.isEmpty()) "Toque em Escanear para iniciar."
                       else "Redes encontradas: ${networks.size}", 14f, Brand.NAVY, true
@@ -276,10 +296,57 @@ jobs:
                   )
                   val sv = page(intro)
                   val col = sv.getChildAt(0) as LinearLayout
+                  col.addView(connectionCard, lp(t = 12))
                   col.addView(status, lp(t = 16, b = 8))
                   col.addView(list, lp())
                   col.addView(note, lp(t = 12))
                   return sv
+              }
+
+              private fun verifyWifiConnection(output: TextView) {
+                  try {
+                      val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                      val active = connectivity.activeNetwork
+                      if (active == null) {
+                          output.text = "SEM CONEXÃO WI-FI ATIVA\\nConecte-se à rede e verifique novamente."
+                          return
+                      }
+
+                      val capabilities = connectivity.getNetworkCapabilities(active)
+                      if (capabilities == null || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                          output.text = "O aparelho não está usando uma conexão Wi-Fi ativa."
+                          return
+                      }
+
+                      val properties = connectivity.getLinkProperties(active)
+                      val addresses = properties?.linkAddresses?.map { it.address } ?: emptyList()
+                      val ipv4 = addresses.firstOrNull {
+                          it is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress
+                      }
+                      val ipv6 = addresses.firstOrNull {
+                          it !is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress
+                      }
+                      val ip = ipv4?.hostAddress ?: ipv6?.hostAddress
+
+                      if (ip == null) {
+                          output.text = "WI-FI CONECTADO, MAS SEM IP LOCAL VÁLIDO\\n" +
+                              "O aparelho ainda não apresenta um endereço IP utilizável nessa conexão."
+                          return
+                      }
+
+                      val internetValidated = capabilities.hasCapability(
+                          NetworkCapabilities.NET_CAPABILITY_VALIDATED
+                      )
+                      output.text = "CONEXÃO WI-FI ATIVA\\n" +
+                          "IP local: $ip\\n" +
+                          "Internet validada: ${if (internetValidated) "sim" else "não / rede sem validação externa"}\\n" +
+                          "Verificação feita pelo Android. O endereço IP confirma a configuração de rede, " +
+                          "mas não identifica por si só como a autenticação foi realizada."
+                  } catch (e: SecurityException) {
+                      output.text = "O Android bloqueou a leitura do estado da conexão."
+                  } catch (e: Exception) {
+                      output.text = "Não foi possível consultar a conexão: ${e.message ?: "erro desconhecido"}"
+                  }
               }
 
               private fun populateNetworkList() {
