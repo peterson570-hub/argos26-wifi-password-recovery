@@ -1,0 +1,1280 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Aceitar licencas do SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+      - name: Criar arquivos do projeto
+        run: |
+          mkdir -p app
+          cat > app/build.gradle.kts <<'PROJ_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "br.com.argos26.wifipasswordrecovery"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "br.com.argos26.wifipasswordrecovery"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 3
+                  versionName = "1.1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      // Assinado com a chave debug para que o APK release seja instalável direto.
+                      // Para publicação na Play Store, troque por um keystore próprio.
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+
+              lint { abortOnError = false }
+          }
+
+          // Sem dependências externas de propósito: o app usa apenas o framework Android
+          // (+ stdlib Kotlin, adicionada automaticamente), o que reduz superfície de falha
+          // de build e de supply-chain.
+          dependencies { }
+          PROJ_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'PROJ_EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-feature android:name="android.hardware.wifi" android:required="false" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:label="Wi-Fi Password Recovery"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:supportsRtl="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          PROJ_EOF
+          mkdir -p app/src/main/java/br/com/argos26/wifipasswordrecovery
+          cat > app/src/main/java/br/com/argos26/wifipasswordrecovery/MainActivity.kt <<'PROJ_EOF'
+          package br.com.argos26.wifipasswordrecovery
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.PackageManager
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.net.wifi.WifiManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.WindowInsets
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          @Suppress("DEPRECATION")
+          class MainActivity : Activity() {
+
+              private lateinit var wifi: WifiManager
+              private lateinit var contentFrame: FrameLayout
+              private val navItems = mutableListOf<TextView>()
+              private var currentTab = 0
+
+              private var networks: List<AuditedNetwork> = emptyList()
+              private var scanTimeMs = 0L
+              private var passwordResult: PasswordResult? = null
+
+              private var scanStatus: TextView? = null
+              private var scanList: LinearLayout? = null
+              private var pwInput: EditText? = null
+
+              private var receiverRegistered = false
+              private val handler = Handler(Looper.getMainLooper())
+              private var timeoutRunnable: Runnable? = null
+
+              private val scanReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context, intent: Intent) {
+                      if (intent.action == WifiManager.SCAN_RESULTS_AVAILABLE_ACTION) {
+                          cancelTimeout()
+                          loadResults()
+                      }
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                  window.statusBarColor = Brand.NAVY
+                  window.navigationBarColor = Brand.NAVY
+                  setContentView(buildRoot())
+                  showTab(0)
+              }
+
+              // ---------- Estrutura ----------
+
+              private fun buildRoot(): View {
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(Brand.NAVY)
+                  root.setOnApplyWindowInsetsListener { v, insets ->
+                      if (Build.VERSION.SDK_INT >= 30) {
+                          val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                          v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                      } else {
+                          v.setPadding(
+                              insets.systemWindowInsetLeft, insets.systemWindowInsetTop,
+                              insets.systemWindowInsetRight, insets.systemWindowInsetBottom
+                          )
+                      }
+                      insets
+                  }
+
+                  // Cabeçalho
+                  val header = LinearLayout(this)
+                  header.orientation = LinearLayout.VERTICAL
+                  header.setBackgroundColor(Brand.NAVY)
+                  header.setPadding(dp(20), dp(14), dp(20), dp(12))
+                  header.addView(tv("EQUIPE ARGOS26", 12f, Brand.YELLOW, true))
+                  header.addView(tv("Wi-Fi Password Recovery", 22f, Brand.WHITE, true))
+                  root.addView(header, lp())
+                  val stripe = View(this)
+                  stripe.setBackgroundColor(Brand.YELLOW)
+                  root.addView(stripe, LinearLayout.LayoutParams(MATCH, dp(3)))
+
+                  // Conteúdo
+                  contentFrame = FrameLayout(this)
+                  contentFrame.setBackgroundColor(Brand.BG)
+                  root.addView(contentFrame, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+                  // Navegação inferior
+                  val nav = LinearLayout(this)
+                  nav.orientation = LinearLayout.HORIZONTAL
+                  nav.setBackgroundColor(Brand.NAVY_SOFT)
+                  listOf("Scanner", "Senhas", "Laboratório", "Relatório").forEachIndexed { index, label ->
+                      val item = tv(label, 14f, Brand.WHITE, true)
+                      item.gravity = Gravity.CENTER
+                      item.setPadding(0, dp(14), 0, dp(14))
+                      item.setOnClickListener { showTab(index) }
+                      navItems.add(item)
+                      nav.addView(item, LinearLayout.LayoutParams(0, WRAP, 1f))
+                  }
+                  root.addView(nav, lp())
+                  return root
+              }
+
+              private fun showTab(index: Int) {
+                  currentTab = index
+                  contentFrame.removeAllViews()
+                  scanStatus = null; scanList = null; pwInput = null
+                  val view = when (index) {
+                      0 -> buildScannerTab()
+                      1 -> buildPasswordTab()
+                      2 -> buildLabTab()
+                      else -> buildReportTab()
+                  }
+                  contentFrame.addView(view)
+                  navItems.forEachIndexed { i, item ->
+                      val selected = i == index
+                      item.setTextColor(if (selected) Brand.YELLOW else Color.argb(170, 255, 255, 255))
+                      item.setBackgroundColor(if (selected) Brand.NAVY else Color.TRANSPARENT)
+                  }
+              }
+
+              private fun page(vararg children: View): ScrollView {
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(16), dp(16), dp(16), dp(24))
+                  children.forEach { col.addView(it) }
+                  val sv = ScrollView(this)
+                  sv.isFillViewport = true
+                  sv.addView(col)
+                  return sv
+              }
+
+              private fun bulletList(items: List<String>, color: Int = Brand.TEXT): TextView =
+                  tv(items.joinToString("\n") { "• $it" }, 13f, color)
+
+              // ---------- Aba Scanner ----------
+
+              private fun buildScannerTab(): View {
+                  val intro = card()
+                  intro.addView(tv("Scanner Wi-Fi", 20f, Brand.NAVY, true))
+                  intro.addView(
+                      tv(
+                          "Lê apenas as informações que as redes próximas já transmitem (SSID, BSSID, " +
+                              "criptografia, canal e sinal). O app não conecta, não captura tráfego e " +
+                              "não tenta descobrir senhas de redes.",
+                          13f, Brand.MUTED
+                      ), lp(t = 6)
+                  )
+                  val scanBtn = actionButton("ESCANEAR REDES PRÓXIMAS") { requestPermissionAndScan() }
+                  intro.addView(scanBtn, lp(t = 14))
+                  val settingsBtn = actionButton("Abrir configurações de localização", false) {
+                      startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                  }
+                  intro.addView(settingsBtn, lp(t = 8))
+
+                  val status = tv(
+                      if (networks.isEmpty()) "Toque em Escanear para iniciar."
+                      else "Redes encontradas: ${networks.size}", 14f, Brand.NAVY, true
+                  )
+                  scanStatus = status
+                  val list = LinearLayout(this)
+                  list.orientation = LinearLayout.VERTICAL
+                  scanList = list
+                  populateNetworkList()
+
+                  val note = tv(
+                      "O Android limita a frequência de varreduras e exige permissão de localização " +
+                          "com a localização do aparelho ativada. Alguns fabricantes restringem os resultados.",
+                      12f, Brand.MUTED
+                  )
+                  val sv = page(intro)
+                  val col = sv.getChildAt(0) as LinearLayout
+                  col.addView(status, lp(t = 16, b = 8))
+                  col.addView(list, lp())
+                  col.addView(note, lp(t = 12))
+                  return sv
+              }
+
+              private fun populateNetworkList() {
+                  val list = scanList ?: return
+                  list.removeAllViews()
+                  networks.forEach { list.addView(networkCard(it), lp(b = 12)) }
+              }
+
+              private fun networkCard(n: AuditedNetwork): View {
+                  val c = card()
+                  val top = LinearLayout(this)
+                  top.orientation = LinearLayout.HORIZONTAL
+                  top.gravity = Gravity.CENTER_VERTICAL
+                  top.addView(tv(n.displaySsid, 17f, Brand.NAVY, true), LinearLayout.LayoutParams(0, WRAP, 1f))
+                  top.addView(pill("Risco ${n.risk.label}", n.risk.color))
+                  c.addView(top)
+
+                  val ch = if (n.channel > 0) "${n.channel}" else "?"
+                  c.addView(tv("BSSID: ${n.entry.bssid}", 12f, Brand.MUTED), lp(t = 6))
+                  c.addView(tv("Segurança: ${n.security.label}", 14f), lp(t = 4))
+                  c.addView(tv("Canal: $ch  •  ${n.band}  •  ${n.entry.frequencyMhz} MHz", 14f), lp(t = 2))
+                  c.addView(tv("Sinal: ${n.entry.levelDbm} dBm (${n.signalPercent}%)", 14f), lp(t = 2))
+
+                  val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  bar.max = 100
+                  bar.progress = n.signalPercent
+                  bar.progressTintList = ColorStateList.valueOf(Brand.BLUE)
+                  c.addView(bar, lp(h = dp(8), t = 6))
+
+                  val details = LinearLayout(this)
+                  details.orientation = LinearLayout.VERTICAL
+                  details.visibility = View.GONE
+                  details.addView(tv("Achados", 13f, Brand.NAVY, true), lp(t = 10))
+                  details.addView(bulletList(n.findings.ifEmpty { listOf("Nenhum achado relevante.") }))
+                  details.addView(tv("Recomendações", 13f, Brand.NAVY, true), lp(t = 8))
+                  details.addView(bulletList(n.recommendations))
+                  c.addView(details)
+
+                  val hint = tv("Toque para ver detalhes ▾", 12f, Brand.BLUE, true)
+                  c.addView(hint, lp(t = 8))
+                  c.setOnClickListener {
+                      val open = details.visibility == View.VISIBLE
+                      details.visibility = if (open) View.GONE else View.VISIBLE
+                      hint.text = if (open) "Toque para ver detalhes ▾" else "Ocultar detalhes ▴"
+                  }
+                  return c
+              }
+
+              private fun requestPermissionAndScan() {
+                  if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), REQ_LOCATION)
+                      return
+                  }
+                  startWifiScan()
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode != REQ_LOCATION) return
+                  if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                      startWifiScan()
+                  } else {
+                      scanStatus?.text = "Permissão não concedida. O Android exige localização para exibir redes Wi-Fi."
+                  }
+              }
+
+              private fun startWifiScan() {
+                  if (!wifi.isWifiEnabled) {
+                      scanStatus?.text = "O Wi-Fi está desligado. Ligue o Wi-Fi e tente novamente."
+                      return
+                  }
+                  if (!receiverRegistered) {
+                      val filter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          registerReceiver(scanReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                      } else {
+                          registerReceiver(scanReceiver, filter)
+                      }
+                      receiverRegistered = true
+                  }
+                  scanStatus?.text = "Escaneando redes próximas..."
+                  val started = wifi.startScan()
+                  if (!started) {
+                      scanStatus?.text = "O Android limitou uma nova varredura. Mostrando os últimos resultados."
+                      loadResults()
+                  } else {
+                      cancelTimeout()
+                      val r = Runnable { loadResults() }
+                      timeoutRunnable = r
+                      handler.postDelayed(r, 10_000)
+                  }
+              }
+
+              private fun cancelTimeout() {
+                  timeoutRunnable?.let { handler.removeCallbacks(it) }
+                  timeoutRunnable = null
+              }
+
+              @Suppress("DEPRECATION", "MissingPermission")
+              private fun loadResults() {
+                  val raw = try {
+                      wifi.scanResults
+                  } catch (e: SecurityException) {
+                      scanStatus?.text = "Sem permissão para ler os resultados Wi-Fi."
+                      return
+                  }
+                  if (raw.isNullOrEmpty()) {
+                      scanStatus?.text = "Nenhuma rede retornada. Verifique a localização do aparelho e tente de novo."
+                      return
+                  }
+                  val entries = raw.map {
+                      ScanEntry(it.SSID ?: "", it.BSSID ?: "", it.capabilities ?: "", it.frequency, it.level)
+                  }
+                  networks = SecurityAnalyzer.audit(entries)
+                  scanTimeMs = System.currentTimeMillis()
+                  scanStatus?.text = "Redes encontradas: ${networks.size}"
+                  populateNetworkList()
+              }
+
+              // ---------- Aba Senhas ----------
+
+              private fun buildPasswordTab(): View {
+                  val c = card()
+                  c.addView(tv("Análise local de senha", 20f, Brand.NAVY, true))
+                  c.addView(
+                      tv(
+                          "Recuperação por QR Code e experimentos Dictionary/Random em laboratório. " +
+                              "O Android não permite que um app comum leia a senha de qualquer rede próxima. " +
+                              "A demonstração de busca é offline e não tenta autenticar em redes Wi-Fi.",
+                          13f, Brand.MUTED
+                      ), lp(t = 6)
+                  )
+
+                  val owner = CheckBox(this)
+                  owner.text = "Declaro que sou o proprietário/autorizado desta rede"
+                  owner.textSize = 13f
+                  owner.setTextColor(Brand.TEXT)
+                  c.addView(owner, lp(t = 10))
+
+                  val input = EditText(this)
+                  input.hint = "Senha para análise de força"
+                  input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  input.setSingleLine()
+                  pwInput = input
+                  c.addView(input, lp(t = 6))
+
+                  val show = CheckBox(this)
+                  show.text = "Mostrar senha"
+                  show.textSize = 13f
+                  show.setTextColor(Brand.TEXT)
+                  show.setOnCheckedChangeListener { _, checked ->
+                      val type = if (checked) InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                      else InputType.TYPE_TEXT_VARIATION_PASSWORD
+                      input.inputType = InputType.TYPE_CLASS_TEXT or type
+                      input.setSelection(input.text.length)
+                  }
+                  c.addView(show)
+
+                  val resultBox = LinearLayout(this)
+                  resultBox.orientation = LinearLayout.VERTICAL
+
+                  c.addView(actionButton("ANALISAR FORÇA DA SENHA") {
+                      if (!owner.isChecked) {
+                          Toast.makeText(this, "Confirme que a rede é sua ou que você está autorizado.", Toast.LENGTH_LONG).show()
+                      } else if (input.text.isNullOrEmpty()) {
+                          Toast.makeText(this, "Digite uma senha para analisar.", Toast.LENGTH_SHORT).show()
+                      } else {
+                          val r = PasswordAnalyzer.analyze(input.text.toString())
+                          passwordResult = r
+                          renderPasswordResult(resultBox, r)
+                      }
+                  }, lp(t = 10))
+                  c.addView(resultBox, lp(t = 12))
+                  passwordResult?.let { renderPasswordResult(resultBox, it) }
+
+                  val lab = card()
+                  lab.addView(tv("Uso responsável", 15f, Brand.NAVY, true))
+                  lab.addView(
+                      tv(
+                          "Dictionary e Random demonstram conceitos de busca offline usando uma senha de referência " +
+                              "fornecida pelo aluno. O resultado não comprova acesso à rede nem substitui " +
+                              "um teste real de autenticação.", 13f, Brand.MUTED
+                      ), lp(t = 4)
+                  )
+                  val sv = page(c)
+                  (sv.getChildAt(0) as LinearLayout).addView(lab, lp(t = 12))
+                  return sv
+              }
+
+              private fun renderPasswordResult(box: LinearLayout, r: PasswordResult) {
+                  box.removeAllViews()
+                  val row = LinearLayout(this)
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  row.addView(tv("Força: ${r.label}", 17f, Brand.NAVY, true), LinearLayout.LayoutParams(0, WRAP, 1f))
+                  row.addView(pill("${r.score}/100", r.level.color))
+                  box.addView(row)
+                  val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  bar.max = 100
+                  bar.progress = r.score
+                  bar.progressTintList = ColorStateList.valueOf(r.level.color)
+                  box.addView(bar, lp(h = dp(8), t = 8))
+                  box.addView(
+                      tv(
+                          "Tamanho: ${r.length} caracteres\nEntropia estimada: ~${r.entropyBits} bits\n" +
+                              "Tempo teórico de quebra offline: ${r.crackTime}\n" +
+                              "Válida para WPA2/WPA3 (8–63): ${if (r.validForWpa) "sim" else "não"}", 13f
+                      ), lp(t = 8)
+                  )
+                  if (r.issues.isNotEmpty()) {
+                      box.addView(tv("Problemas", 13f, Brand.NAVY, true), lp(t = 8))
+                      box.addView(bulletList(r.issues))
+                  }
+                  box.addView(tv("Recomendações", 13f, Brand.NAVY, true), lp(t = 8))
+                  box.addView(bulletList(r.tips))
+                  box.addView(
+                      tv("Estimativa teórica; não é garantia de segurança.", 11f, Brand.MUTED), lp(t = 6)
+                  )
+              }
+
+              // ---------- Laboratório offline Dictionary / Random ----------
+
+              private fun buildLabTab(): View {
+                  val c = card()
+                  c.addView(tv("Laboratório de busca offline", 20f, Brand.NAVY, true))
+                  c.addView(tv("Demonstração acadêmica: compara candidatos com uma senha de referência informada pelo responsável pelo laboratório. Não se conecta ao roteador nem testa redes reais.", 13f, Brand.MUTED), lp(t = 6))
+
+                  val consent = CheckBox(this)
+                  consent.text = "Confirmo que esta senha é minha ou foi fornecida para o experimento"
+                  consent.textSize = 13f
+                  consent.setTextColor(Brand.TEXT)
+                  c.addView(consent, lp(t = 10))
+
+                  val reference = EditText(this)
+                  reference.hint = "Senha de referência do laboratório"
+                  reference.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  reference.setSingleLine()
+                  c.addView(reference, lp(t = 6))
+
+                  val candidates = EditText(this)
+                  candidates.hint = "Dictionary: um candidato por linha\nEx.: senha123\nArgos@2026\nMinhaRede2026"
+                  candidates.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                  candidates.minLines = 4
+                  candidates.gravity = Gravity.TOP
+                  c.addView(candidates, lp(t = 8))
+
+                  val result = tv("Aguardando experimento.", 14f, Brand.NAVY, true)
+                  c.addView(actionButton("EXECUTAR DICTIONARY") {
+                      if (!consent.isChecked) {
+                          Toast.makeText(this, "Confirme a autorização do laboratório.", Toast.LENGTH_LONG).show()
+                      } else {
+                          val secret = reference.text.toString()
+                          val words = candidates.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+                          if (secret.isEmpty() || words.isEmpty()) {
+                              result.text = "Informe a senha de referência e pelo menos um candidato."
+                          } else {
+                              val found = words.firstOrNull { it == secret }
+                              result.text = if (found != null) "CORRESPONDÊNCIA ENCONTRADA\nSenha: $found\nCandidatos verificados: ${words.indexOf(found) + 1}" else "Nenhuma correspondência.\nCandidatos verificados: ${words.size}"
+                          }
+                      }
+                  }, lp(t = 10))
+                  c.addView(result, lp(t = 12))
+
+                  val randomTitle = tv("Modo Random — demonstração", 16f, Brand.NAVY, true)
+                  c.addView(randomTitle, lp(t = 18))
+                  val randomInfo = tv("Gera uma senha aleatória curta para o laboratório e permite demonstrar a comparação offline. Não representa uma tentativa contra o Wi-Fi.", 12f, Brand.MUTED)
+                  c.addView(randomInfo, lp(t = 4))
+                  c.addView(actionButton("GERAR SENHA DE TESTE", false) {
+                      val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+                      val generated = (1..6).map { alphabet.random() }.joinToString("")
+                      reference.setText(generated)
+                      candidates.setText(generated + "\nSenhaErrada123\nArgos2026")
+                      result.text = "Senha de laboratório gerada e incluída no conjunto de candidatos. Execute o Dictionary para confirmar a correspondência."
+                  }, lp(t = 8))
+
+                  val note = card()
+                  note.addView(tv("Limitação técnica", 14f, Brand.NAVY, true))
+                  note.addView(tv("O Android não entrega a senha de uma rede desconhecida a aplicativos comuns. Este módulo demonstra busca e correspondência offline com uma referência conhecida; não descobre credenciais de um ponto de acesso real.", 12f, Brand.MUTED), lp(t = 4))
+                  val sv = page(c)
+                  (sv.getChildAt(0) as LinearLayout).addView(note, lp(t = 12))
+                  return sv
+              }
+
+              // ---------- Aba Relatório ----------
+
+              private fun buildReportTab(): View {
+                  if (networks.isEmpty()) {
+                      val c = card()
+                      c.addView(tv("Relatório do experimento", 20f, Brand.NAVY, true))
+                      c.addView(tv("Faça um escaneamento na aba Scanner para gerar o relatório.", 14f, Brand.MUTED), lp(t = 6))
+                      return page(c)
+                  }
+                  val summary = card()
+                  summary.addView(tv("Resumo executivo", 20f, Brand.NAVY, true))
+                  summary.addView(tv("${networks.size} redes analisadas", 14f, Brand.MUTED), lp(t = 2))
+                  val pills = LinearLayout(this)
+                  pills.orientation = LinearLayout.HORIZONTAL
+                  RiskLevel.values().reversed().forEach { lvl ->
+                      val count = networks.count { it.risk == lvl }
+                      pills.addView(pill("${lvl.label}: $count", lvl.color), lp(r = 6))
+                  }
+                  summary.addView(pills, lp(t = 10))
+
+                  val report = ReportBuilder.build(networks, scanTimeMs, passwordResult)
+                  val body = card()
+                  val text = tv(report, 11f)
+                  text.typeface = Typeface.MONOSPACE
+                  text.setTextIsSelectable(true)
+                  body.addView(text)
+
+                  val share = actionButton("COMPARTILHAR RELATÓRIO") {
+                      val send = Intent(Intent.ACTION_SEND)
+                      send.type = "text/plain"
+                      send.putExtra(Intent.EXTRA_SUBJECT, "Relatório Wi-Fi — EQUIPE ARGOS26")
+                      send.putExtra(Intent.EXTRA_TEXT, report)
+                      startActivity(Intent.createChooser(send, "Compartilhar relatório"))
+                  }
+                  val sv = page(summary)
+                  val col = sv.getChildAt(0) as LinearLayout
+                  col.addView(share, lp(t = 12))
+                  col.addView(body, lp(t = 12))
+                  return sv
+              }
+
+              // ---------- Ciclo de vida ----------
+
+              override fun onStop() {
+                  // Privacidade: não deixa a senha digitada na tela ao sair do app.
+                  pwInput?.setText("")
+                  super.onStop()
+              }
+
+              override fun onDestroy() {
+                  cancelTimeout()
+                  if (receiverRegistered) {
+                      try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}
+                      receiverRegistered = false
+                  }
+                  super.onDestroy()
+              }
+
+              companion object {
+                  private const val REQ_LOCATION = 501
+              }
+          }
+          PROJ_EOF
+          mkdir -p app/src/main/java/br/com/argos26/wifipasswordrecovery
+          cat > app/src/main/java/br/com/argos26/wifipasswordrecovery/Models.kt <<'PROJ_EOF'
+          package br.com.argos26.wifipasswordrecovery
+
+          import android.graphics.Color
+
+          enum class RiskLevel(val label: String, val color: Int) {
+              LOW("Baixo", Color.parseColor("#1E9E5A")),
+              MEDIUM("Médio", Color.parseColor("#D49A00")),
+              HIGH("Alto", Color.parseColor("#F28C1B")),
+              CRITICAL("Crítico", Color.parseColor("#D93636"))
+          }
+
+          enum class SecurityKind { OPEN, OWE, WEP, WPA, WPA_WPA2, WPA2, WPA2_WPA3, WPA3, UNKNOWN }
+
+          /** Dados brutos de um ponto de acesso, desacoplados da API Android. */
+          data class ScanEntry(
+              val ssid: String,
+              val bssid: String,
+              val capabilities: String,
+              val frequencyMhz: Int,
+              val levelDbm: Int
+          )
+
+          data class SecurityProfile(
+              val kind: SecurityKind,
+              val enterprise: Boolean,
+              val tkip: Boolean,
+              val wps: Boolean,
+              val label: String
+          )
+
+          data class AuditedNetwork(
+              val entry: ScanEntry,
+              val channel: Int,
+              val band: String,
+              val security: SecurityProfile,
+              val score: Int,
+              val risk: RiskLevel,
+              val findings: List<String>,
+              val recommendations: List<String>
+          ) {
+              val displaySsid: String get() = entry.ssid.ifBlank { "(SSID oculto)" }
+              val signalPercent: Int get() = (2 * (entry.levelDbm + 100)).coerceIn(0, 100)
+          }
+
+          data class PasswordResult(
+              val length: Int,
+              val entropyBits: Int,
+              val score: Int,
+              val label: String,
+              val level: RiskLevel,
+              val crackTime: String,
+              val validForWpa: Boolean,
+              val issues: List<String>,
+              val tips: List<String>
+          )
+          PROJ_EOF
+          mkdir -p app/src/main/java/br/com/argos26/wifipasswordrecovery
+          cat > app/src/main/java/br/com/argos26/wifipasswordrecovery/PasswordAnalyzer.kt <<'PROJ_EOF'
+          package br.com.argos26.wifipasswordrecovery
+
+          import kotlin.math.ln
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.pow
+
+          /**
+           * Análise 100% local da força de uma senha informada pelo proprietário.
+           * A senha nunca é armazenada, registrada em log nem enviada pela rede.
+           * Não existe nenhuma função para descobrir/adivinhar senhas de redes.
+           */
+          object PasswordAnalyzer {
+
+              private val commonPasswords = setOf(
+                  "12345678", "123456789", "1234567890", "12345678910", "87654321", "00000000",
+                  "11111111", "123123123", "password", "password1", "senha123", "senha1234",
+                  "senhawifi", "minhasenha", "meuwifi", "wifi1234", "brasil123", "qwerty123",
+                  "admin123", "internet", "abcd1234", "mudar123", "1q2w3e4r", "iloveyou",
+                  "qazwsxedc", "corinthians", "flamengo", "palmeiras", "visitante", "convidado"
+              )
+              private val commonWords = listOf(
+                  "password", "senha", "brasil", "qwerty", "admin", "wifi", "internet",
+                  "flamengo", "corinthians", "palmeiras", "mudar", "123456", "abcdef",
+                  "iloveyou", "welcome", "letmein", "roteador", "router"
+              )
+              private val keyboardRuns = listOf("qwert", "asdfg", "zxcvb", "1q2w3e", "qazwsx", "poiuy")
+
+              private fun normalizeLeet(s: String): String = s.lowercase()
+                  .replace('0', 'o').replace('1', 'i').replace('3', 'e')
+                  .replace('4', 'a').replace('5', 's').replace('7', 't')
+                  .replace('@', 'a').replace('$', 's')
+
+              fun analyze(pw: String): PasswordResult {
+                  val issues = mutableListOf<String>()
+                  val tips = mutableListOf<String>()
+                  val len = pw.length
+                  if (len == 0) {
+                      return PasswordResult(0, 0, 0, "Vazia", RiskLevel.CRITICAL, "—", false,
+                          listOf("Nenhuma senha informada."), listOf("Digite a senha para analisar."))
+                  }
+
+                  var pool = 0
+                  if (pw.any { it in 'a'..'z' }) pool += 26
+                  if (pw.any { it in 'A'..'Z' }) pool += 26
+                  if (pw.any { it in '0'..'9' }) pool += 10
+                  if (pw.any { it.code < 128 && !it.isLetterOrDigit() }) pool += 33
+                  if (pw.any { it.code >= 128 }) pool += 64
+                  if (pool == 0) pool = 10
+
+                  val unique = pw.toSet().size
+                  val effectiveLen = unique + (len - unique) * 0.25
+                  var bits = effectiveLen * (ln(pool.toDouble()) / ln(2.0))
+
+                  // Sequências crescentes/decrescentes (abc, 123, 321)
+                  var seqRuns = 0
+                  var i = 0
+                  while (i < len - 2) {
+                      val d1 = pw[i + 1].code - pw[i].code
+                      val d2 = pw[i + 2].code - pw[i + 1].code
+                      if ((d1 == 1 || d1 == -1) && d1 == d2) {
+                          seqRuns++
+                          var j = i + 2
+                          while (j < len - 1 && pw[j + 1].code - pw[j].code == d1) j++
+                          i = j
+                      } else i++
+                  }
+                  if (seqRuns > 0) {
+                      bits -= 6.0 * seqRuns
+                      issues += "Contém sequências previsíveis (ex.: abc, 123)."
+                  }
+
+                  val lower = pw.lowercase()
+                  if (keyboardRuns.any { lower.contains(it) }) {
+                      bits -= 12
+                      issues += "Contém padrão de teclado (ex.: qwerty, asdfg)."
+                  }
+                  if (Regex("^(.{1,4})\\1+$").containsMatchIn(pw)) {
+                      bits *= 0.4
+                      issues += "É formada por um bloco curto repetido."
+                  }
+                  if (unique < len * 0.6) issues += "Muitos caracteres repetidos."
+                  if (Regex("(19|20)\\d{2}").containsMatchIn(pw)) {
+                      bits -= 5
+                      issues += "Contém um ano, muito comum em senhas."
+                  }
+
+                  val norm = normalizeLeet(pw)
+                  val isCommon = lower in commonPasswords || norm in commonPasswords
+                  if (isCommon) {
+                      bits = min(bits, 10.0)
+                      issues += "É uma senha extremamente comum e consta em listas conhecidas."
+                  } else if (commonWords.any { norm.contains(it) }) {
+                      bits -= 15
+                      issues += "Contém palavra muito comum (mesmo com troca de letras por números/símbolos)."
+                  }
+                  if (pw.all { it.isDigit() }) issues += "Usa apenas números."
+                  else if (pw.all { it.isLetter() }) issues += "Usa apenas letras."
+
+                  bits = max(bits, 0.0)
+                  val validForWpa = len in 8..63
+                  if (len < 8) issues += "Menos de 8 caracteres: inválida para WPA2/WPA3 (mínimo 8)."
+                  if (len > 63) issues += "Mais de 63 caracteres: inválida para WPA2/WPA3 (máximo 63)."
+                  if (len in 8..11) issues += "Curta para uma rede Wi-Fi; prefira 16 caracteres ou mais."
+
+                  val score = min(100, (bits / 80.0 * 100).toInt())
+                  val (label, level) = when {
+                      bits < 28 -> "Muito fraca" to RiskLevel.CRITICAL
+                      bits < 40 -> "Fraca" to RiskLevel.HIGH
+                      bits < 60 -> "Razoável" to RiskLevel.MEDIUM
+                      bits < 80 -> "Boa" to RiskLevel.LOW
+                      else -> "Forte" to RiskLevel.LOW
+                  }
+
+                  tips += "Use uma frase-senha de 4+ palavras não relacionadas (16+ caracteres)."
+                  tips += "Evite dados pessoais, datas, nome da rede ou do provedor."
+                  tips += "Use uma senha única para o Wi-Fi, diferente de outras contas."
+                  tips += "Troque a senha padrão do roteador e a senha de administração dele."
+                  if (level == RiskLevel.CRITICAL || level == RiskLevel.HIGH) {
+                      tips += "Troque esta senha o quanto antes."
+                  }
+
+                  return PasswordResult(len, bits.toInt(), score, label, level, formatCrackTime(bits),
+                      validForWpa, issues, tips)
+              }
+
+              /** Estimativa teórica e conservadora: 1 bilhão de tentativas/s, metade do espaço. */
+              private fun formatCrackTime(bits: Double): String {
+                  val seconds = 2.0.pow(max(bits - 1, 0.0)) / 1e9
+                  return when {
+                      seconds < 1 -> "menos de 1 segundo"
+                      seconds < 60 -> "${seconds.toInt()} segundos"
+                      seconds < 3600 -> "${(seconds / 60).toInt()} minutos"
+                      seconds < 86400 -> "${(seconds / 3600).toInt()} horas"
+                      seconds < 86400 * 365 -> "${(seconds / 86400).toInt()} dias"
+                      seconds < 86400.0 * 365 * 1e9 -> {
+                          val years = seconds / (86400.0 * 365)
+                          if (years < 1e6) "${years.toLong()} anos" else "milhões de anos"
+                      }
+                      else -> "mais de 1 bilhão de anos"
+                  }
+              }
+          }
+          PROJ_EOF
+          mkdir -p app/src/main/java/br/com/argos26/wifipasswordrecovery
+          cat > app/src/main/java/br/com/argos26/wifipasswordrecovery/ReportBuilder.kt <<'PROJ_EOF'
+          package br.com.argos26.wifipasswordrecovery
+
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          object ReportBuilder {
+
+              fun build(networks: List<AuditedNetwork>, scanTimeMs: Long, password: PasswordResult?): String {
+                  val fmt = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR"))
+                  val sb = StringBuilder()
+                  val line = "=".repeat(40)
+
+                  sb.appendLine(line)
+                  sb.appendLine("EQUIPE ARGOS26")
+                  sb.appendLine("RELATÓRIO DE SEGURANÇA WI-FI")
+                  sb.appendLine(line)
+                  sb.appendLine("Data da varredura: ${fmt.format(Date(scanTimeMs))}")
+                  sb.appendLine("Emitido em: ${fmt.format(Date())}")
+                  sb.appendLine("Método: varredura passiva (somente beacons públicos)")
+                  sb.appendLine()
+
+                  sb.appendLine("1. RESUMO EXECUTIVO")
+                  sb.appendLine("-".repeat(40))
+                  if (networks.isEmpty()) {
+                      sb.appendLine("Nenhuma rede foi analisada.")
+                  } else {
+                      sb.appendLine("Redes analisadas: ${networks.size}")
+                      RiskLevel.values().reversed().forEach { lvl ->
+                          sb.appendLine("  • Risco ${lvl.label}: ${networks.count { it.risk == lvl }}")
+                      }
+                      val worst = networks.maxByOrNull { it.score }
+                      if (worst != null) {
+                          sb.appendLine("Maior risco: ${worst.displaySsid} (${worst.security.label}, ${worst.risk.label})")
+                      }
+                  }
+                  sb.appendLine()
+
+                  sb.appendLine("2. REDES DETECTADAS")
+                  sb.appendLine("-".repeat(40))
+                  networks.forEachIndexed { i, n ->
+                      sb.appendLine("${i + 1}. ${n.displaySsid}")
+                      sb.appendLine("   BSSID: ${n.entry.bssid}")
+                      sb.appendLine("   Segurança: ${n.security.label}")
+                      val ch = if (n.channel > 0) n.channel.toString() else "?"
+                      sb.appendLine("   Canal: $ch (${n.band}, ${n.entry.frequencyMhz} MHz)")
+                      sb.appendLine("   Sinal: ${n.entry.levelDbm} dBm (${n.signalPercent}%)")
+                      sb.appendLine("   Risco: ${n.risk.label} (pontuação ${n.score}/100)")
+                      n.findings.forEach { sb.appendLine("   - Achado: $it") }
+                      n.recommendations.forEach { sb.appendLine("   - Ação: $it") }
+                      sb.appendLine()
+                  }
+
+                  sb.appendLine("3. ANÁLISE DE SENHA (LOCAL)")
+                  sb.appendLine("-".repeat(40))
+                  if (password == null) {
+                      sb.appendLine("Nenhuma senha foi analisada nesta sessão.")
+                  } else {
+                      sb.appendLine("A senha em si NÃO é registrada neste relatório.")
+                      sb.appendLine("Tamanho: ${password.length} caracteres")
+                      sb.appendLine("Classificação: ${password.label} (${password.score}/100)")
+                      sb.appendLine("Entropia estimada: ~${password.entropyBits} bits")
+                      sb.appendLine("Tempo teórico de quebra offline: ${password.crackTime}")
+                      sb.appendLine("Válida para WPA2/WPA3 (8–63): ${if (password.validForWpa) "sim" else "não"}")
+                      password.issues.forEach { sb.appendLine("  - Problema: $it") }
+                  }
+                  sb.appendLine()
+
+                  sb.appendLine("4. RECOMENDAÇÕES GERAIS")
+                  sb.appendLine("-".repeat(40))
+                  val general = mutableListOf(
+                      "Use WPA3 (ou WPA2-AES) e senha única com 16+ caracteres.",
+                      "Desative WPS e o acesso administrativo remoto do roteador.",
+                      "Troque as credenciais de administração padrão do roteador.",
+                      "Mantenha o firmware atualizado.",
+                      "Separe visitantes e dispositivos IoT em uma rede de convidados."
+                  )
+                  if (networks.any { it.security.kind == SecurityKind.OPEN }) general += "Evite redes abertas ou use VPN."
+                  if (networks.any { it.security.kind == SecurityKind.WEP || it.security.kind == SecurityKind.WPA }) {
+                      general += "Substitua redes WEP/WPA legadas imediatamente."
+                  }
+                  general.forEach { sb.appendLine("  • $it") }
+                  sb.appendLine()
+
+                  sb.appendLine("5. ESCOPO E LIMITAÇÕES")
+                  sb.appendLine("-".repeat(40))
+                  sb.appendLine("• Avaliação passiva baseada apenas nas informações anunciadas pelas redes.")
+                  sb.appendLine("• Não houve conexão, quebra de senha, força bruta ou captura de tráfego.")
+                  sb.appendLine("• Testes ativos só devem ocorrer em laboratório com autorização formal.")
+                  sb.appendLine("• A pontuação é uma heurística e não substitui um pentest autorizado.")
+                  sb.appendLine("• O Android limita a frequência de varreduras e pode omitir redes.")
+                  return sb.toString()
+              }
+          }
+          PROJ_EOF
+          mkdir -p app/src/main/java/br/com/argos26/wifipasswordrecovery
+          cat > app/src/main/java/br/com/argos26/wifipasswordrecovery/SecurityAnalyzer.kt <<'PROJ_EOF'
+          package br.com.argos26.wifipasswordrecovery
+
+          import kotlin.math.abs
+
+          /**
+           * Avaliação PASSIVA: usa apenas o que a rede já anuncia nos beacons
+           * (capabilities, frequência, sinal). Nenhuma conexão, injeção de pacotes,
+           * captura de handshake ou tentativa de autenticação é realizada.
+           */
+          object SecurityAnalyzer {
+
+              fun channelOf(freq: Int): Int = when (freq) {
+                  in 2412..2472 -> (freq - 2407) / 5
+                  2484 -> 14
+                  in 5160..5895 -> (freq - 5000) / 5
+                  in 5955..7115 -> (freq - 5950) / 5
+                  else -> -1
+              }
+
+              fun bandOf(freq: Int): String = when (freq) {
+                  in 2400..2500 -> "2,4 GHz"
+                  in 5150..5895 -> "5 GHz"
+                  in 5925..7125 -> "6 GHz"
+                  else -> "?"
+              }
+
+              fun parseSecurity(capabilities: String): SecurityProfile {
+                  val tokens = Regex("\\[([^\\]]*)\\]").findAll(capabilities)
+                      .map { it.groupValues[1].uppercase() }.toList()
+
+                  val wep = tokens.any { it.startsWith("WEP") }
+                  val wpa1 = tokens.any { it.startsWith("WPA-") || it == "WPA" }
+                  val legacyWpa2 = tokens.any {
+                      it.startsWith("WPA2-") ||
+                          (it.startsWith("RSN-") && (it.contains("PSK") || it.contains("EAP")))
+                  }
+                  val sae = tokens.any { it.contains("SAE") }
+                  val owe = tokens.any { it.contains("OWE") }
+                  val eap = tokens.any { it.contains("EAP") }
+                  val tkip = tokens.any { it.contains("TKIP") }
+                  val wps = tokens.any { it == "WPS" }
+
+                  val kind = when {
+                      sae && legacyWpa2 -> SecurityKind.WPA2_WPA3
+                      sae -> SecurityKind.WPA3
+                      wpa1 && legacyWpa2 -> SecurityKind.WPA_WPA2
+                      wpa1 -> SecurityKind.WPA
+                      legacyWpa2 -> SecurityKind.WPA2
+                      owe -> SecurityKind.OWE
+                      wep -> SecurityKind.WEP
+                      else -> SecurityKind.OPEN
+                  }
+                  val base = when (kind) {
+                      SecurityKind.OPEN -> "Aberta (sem criptografia)"
+                      SecurityKind.OWE -> "Aberta com OWE"
+                      SecurityKind.WEP -> "WEP"
+                      SecurityKind.WPA -> "WPA"
+                      SecurityKind.WPA_WPA2 -> "WPA/WPA2"
+                      SecurityKind.WPA2 -> "WPA2"
+                      SecurityKind.WPA2_WPA3 -> "WPA2/WPA3"
+                      SecurityKind.WPA3 -> "WPA3"
+                      SecurityKind.UNKNOWN -> "Não identificada"
+                  }
+                  val enterprise = eap && kind != SecurityKind.OPEN
+                  val label = if (enterprise) "$base Enterprise" else base
+                  return SecurityProfile(kind, enterprise, tkip, wps && !enterprise, label)
+              }
+
+              fun audit(entries: List<ScanEntry>): List<AuditedNetwork> {
+                  val sorted = entries.sortedByDescending { it.levelDbm }
+                  val profiles = sorted.map { parseSecurity(it.capabilities) }
+
+                  return sorted.mapIndexed { i, e ->
+                      val p = profiles[i]
+                      val findings = mutableListOf<String>()
+                      val recs = mutableListOf<String>()
+                      var score = when (p.kind) {
+                          SecurityKind.OPEN -> 90
+                          SecurityKind.WEP -> 100
+                          SecurityKind.WPA -> 80
+                          SecurityKind.WPA_WPA2 -> 55
+                          SecurityKind.OWE -> 30
+                          SecurityKind.WPA2 -> if (p.enterprise) 10 else 20
+                          SecurityKind.WPA2_WPA3 -> 15
+                          SecurityKind.WPA3 -> 5
+                          SecurityKind.UNKNOWN -> 40
+                      }
+
+                      when (p.kind) {
+                          SecurityKind.OPEN -> {
+                              findings += "Rede aberta: o tráfego trafega sem criptografia e pode ser observado por terceiros."
+                              recs += "Habilite WPA3-Personal (ou WPA2-AES) com senha forte; em redes públicas, use VPN."
+                          }
+                          SecurityKind.WEP -> {
+                              findings += "WEP é um protocolo obsoleto e considerado quebrado."
+                              recs += "Substitua imediatamente por WPA3 ou WPA2-AES; se o roteador não suporta, troque o equipamento."
+                          }
+                          SecurityKind.WPA -> {
+                              findings += "WPA (original) com TKIP é obsoleto e vulnerável."
+                              recs += "Migre para WPA2-AES ou WPA3."
+                          }
+                          SecurityKind.WPA_WPA2 -> {
+                              findings += "Modo misto WPA/WPA2 mantém compatibilidade com o WPA legado, mais fraco."
+                              recs += "Desative o WPA legado e use somente WPA2-AES ou WPA3."
+                          }
+                          SecurityKind.OWE -> {
+                              findings += "OWE criptografa o tráfego, mas não autentica a rede nem os usuários."
+                              recs += "Para uso corporativo/privado, prefira WPA3-Personal ou Enterprise."
+                          }
+                          SecurityKind.WPA2 -> if (!p.enterprise) {
+                              recs += "WPA2-AES é aceitável; se o roteador e os dispositivos suportarem, migre para WPA3."
+                          }
+                          SecurityKind.WPA2_WPA3 -> {
+                              findings += "Modo de transição WPA2/WPA3: clientes antigos ainda podem usar WPA2."
+                              recs += "Quando todos os dispositivos suportarem, use WPA3 exclusivo."
+                          }
+                          SecurityKind.WPA3 -> findings += "WPA3 em uso: configuração moderna."
+                          SecurityKind.UNKNOWN -> {
+                              findings += "Não foi possível identificar o tipo de segurança anunciado."
+                          }
+                      }
+                      if (p.tkip && p.kind != SecurityKind.WPA && p.kind != SecurityKind.OPEN) {
+                          score += 15
+                          findings += "TKIP habilitado (cifra legada)."
+                          recs += "Configure a cifra como AES/CCMP apenas."
+                      }
+                      if (p.wps) {
+                          score += 15
+                          findings += "WPS anunciado: o recurso de PIN/botão amplia a superfície de ataque."
+                          recs += "Desative o WPS no roteador."
+                      }
+                      if (e.ssid.isBlank()) {
+                          findings += "SSID oculto: não é uma medida de segurança real e pode causar problemas de conexão."
+                          recs += "Mantenha o SSID visível e invista em criptografia e senha fortes."
+                      }
+
+                      // Mesmo nome com configurações de segurança diferentes.
+                      if (e.ssid.isNotBlank()) {
+                          val sameName = sorted.indices.filter { sorted[it].ssid == e.ssid && it != i }
+                          if (sameName.any { profiles[it].kind != p.kind }) {
+                              score += 10
+                              findings += "Outro ponto de acesso usa o mesmo nome com segurança diferente " +
+                                  "(possível rede duplicada/não autorizada ou configuração inconsistente)."
+                              recs += "Confirme se todos os pontos de acesso com este nome são seus e usam a mesma configuração."
+                          }
+                      }
+
+                      // Canal e sinal
+                      val ch = channelOf(e.frequencyMhz)
+                      val band = bandOf(e.frequencyMhz)
+                      if (band == "2,4 GHz") {
+                          val overlap = sorted.count {
+                              it !== e && bandOf(it.frequencyMhz) == "2,4 GHz" &&
+                                  abs(channelOf(it.frequencyMhz) - ch) <= 4
+                          }
+                          if (overlap >= 5) {
+                              findings += "Canal $ch congestionado: $overlap redes com sobreposição (desempenho, não segurança)."
+                              recs += "Mude para os canais 1, 6 ou 11, ou use a faixa de 5 GHz."
+                          } else if (ch !in listOf(1, 6, 11) && ch in 1..13) {
+                              findings += "Canal $ch fora do padrão 1/6/11 aumenta a interferência."
+                          }
+                      } else {
+                          val same = sorted.count {
+                              it !== e && bandOf(it.frequencyMhz) == band && channelOf(it.frequencyMhz) == ch
+                          }
+                          if (same >= 4) {
+                              findings += "Canal $ch compartilhado com $same outras redes."
+                              recs += "Escolha um canal menos utilizado."
+                          }
+                      }
+                      if (e.levelDbm <= -80) {
+                          findings += "Sinal fraco (${e.levelDbm} dBm): conexão instável."
+                      }
+
+                      score = score.coerceIn(0, 100)
+                      val risk = when {
+                          score >= 80 -> RiskLevel.CRITICAL
+                          score >= 55 -> RiskLevel.HIGH
+                          score >= 25 -> RiskLevel.MEDIUM
+                          else -> RiskLevel.LOW
+                      }
+                      if (recs.isEmpty()) recs += "Mantenha o firmware do roteador atualizado e use senha forte e única."
+
+                      AuditedNetwork(e, ch, band, p, score, risk, findings, recs.distinct())
+                  }
+              }
+          }
+          PROJ_EOF
+          mkdir -p app/src/main/java/br/com/argos26/wifipasswordrecovery
+          cat > app/src/main/java/br/com/argos26/wifipasswordrecovery/Ui.kt <<'PROJ_EOF'
+          package br.com.argos26.wifipasswordrecovery
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          object Brand {
+              val NAVY = Color.parseColor("#0B1F3A")
+              val NAVY_SOFT = Color.parseColor("#14305A")
+              val BLUE = Color.parseColor("#1E6FD9")
+              val YELLOW = Color.parseColor("#FFC400")
+              val BG = Color.parseColor("#F3F6FB")
+              val TEXT = Color.parseColor("#0B1F3A")
+              val MUTED = Color.parseColor("#5B6B82")
+              val WHITE = Color.WHITE
+          }
+
+          const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+          const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+          fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+          fun roundedBg(color: Int, radiusPx: Float): GradientDrawable =
+              GradientDrawable().apply {
+                  setColor(color)
+                  cornerRadius = radiusPx
+              }
+
+          fun Context.lp(
+              w: Int = MATCH, h: Int = WRAP,
+              l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0
+          ): LinearLayout.LayoutParams =
+              LinearLayout.LayoutParams(w, h).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }
+
+          fun Context.tv(
+              content: CharSequence,
+              size: Float = 14f,
+              color: Int = Brand.TEXT,
+              bold: Boolean = false
+          ): TextView {
+              val view = TextView(this)
+              view.text = content
+              view.textSize = size
+              view.setTextColor(color)
+              if (bold) view.setTypeface(view.typeface, Typeface.BOLD)
+              return view
+          }
+
+          fun Context.card(): LinearLayout {
+              val c = LinearLayout(this)
+              c.orientation = LinearLayout.VERTICAL
+              c.background = roundedBg(Brand.WHITE, dp(16).toFloat())
+              c.setPadding(dp(16), dp(16), dp(16), dp(16))
+              c.elevation = dp(2).toFloat()
+              return c
+          }
+
+          fun Context.actionButton(label: String, primary: Boolean = true, onClick: () -> Unit): Button {
+              val b = Button(this)
+              b.text = label
+              b.isAllCaps = false
+              b.textSize = 15f
+              b.setTypeface(b.typeface, Typeface.BOLD)
+              b.setTextColor(if (primary) Brand.NAVY else Brand.WHITE)
+              b.background = roundedBg(if (primary) Brand.YELLOW else Brand.BLUE, dp(12).toFloat())
+              b.stateListAnimator = null
+              b.minimumHeight = dp(52)
+              b.setOnClickListener { onClick() }
+              return b
+          }
+
+          fun Context.pill(label: String, color: Int): TextView {
+              val p = tv(label, 12f, Color.WHITE, true)
+              p.setPadding(dp(10), dp(4), dp(10), dp(4))
+              p.background = roundedBg(color, dp(20).toFloat())
+              return p
+          }
+          PROJ_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'PROJ_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path
+                  android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0"
+                  android:strokeColor="#1E6FD9" android:strokeWidth="4" android:fillColor="#00000000" />
+              <path
+                  android:pathData="M58,32 L44,57 L53,57 L49,76 L65,50 L55,50 Z"
+                  android:fillColor="#FFC400" />
+          </vector>
+          PROJ_EOF
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'PROJ_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/navy" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          PROJ_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/colors.xml <<'PROJ_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="navy">#0B1F3A</color>
+              <color name="blue">#1E6FD9</color>
+              <color name="yellow">#FFC400</color>
+          </resources>
+          PROJ_EOF
+          cat > build.gradle.kts <<'PROJ_EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          PROJ_EOF
+          cat > gradle.properties <<'PROJ_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          PROJ_EOF
+          cat > settings.gradle.kts <<'PROJ_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "WiFiPasswordRecovery"
+          include(":app")
+          PROJ_EOF
+          cat > README.md <<'README_EOF'
+          # Wi-Fi Password Recovery — EQUIPE ARGOS26
+
+          Aplicativo Android acadêmico em Kotlin.
+
+          ## Módulos
+          - Scanner passivo de redes próximas e classificação básica de segurança.
+          - Análise local da força de uma senha digitada pelo usuário.
+          - Laboratório offline Dictionary/Random: demonstra comparação de candidatos com uma senha de referência fornecida para o experimento. Não autentica no roteador e não recupera senhas de redes desconhecidas.
+          - Relatório compartilhável.
+
+          ## Compilação
+          O GitHub Actions compila APK Debug e Release em **Actions > Build APK > Artifacts**.
+
+          ## Limitação Android
+          Aplicativos Android comuns não podem ler livremente senhas de redes próximas nem extrair credenciais de qualquer roteador. Para recuperar a senha da rede doméstica, use o QR Code de compartilhamento do Android ou o painel administrativo do roteador.
+          README_EOF
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Compilar
+        run: gradle assembleDebug assembleRelease --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WiFiPasswordRecovery-apk
+          path: app/build/outputs/apk/**/*.apk
