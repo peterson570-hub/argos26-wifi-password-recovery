@@ -274,9 +274,14 @@ jobs:
                   val connectionResult = tv("Conexão ainda não verificada.", 14f, Brand.NAVY, true)
                   connectionCard.addView(connectionResult, lp(t = 8))
                   connectionCard.addView(
+                      actionButton("ABRIR CONFIGURAÇÕES DE WI-FI", false) {
+                          startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                      }, lp(t = 10)
+                  )
+                  connectionCard.addView(
                       actionButton("VERIFICAR ACESSO E ENDEREÇO IP") {
                           verifyWifiConnection(connectionResult)
-                      }, lp(t = 10)
+                      }, lp(t = 8)
                   )
 
                   val status = tv(
