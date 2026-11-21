@@ -569,7 +569,6 @@ jobs:
                                           result.text = "NENHUMA CORRESPONDÊNCIA\n" +
                                               "Candidatos verificados: ${sequence.size}\n" +
                                               "A referência não apareceu na lista fornecida. Nenhuma rede foi acessada."
-                                          isEnabled = true
                                           return
                                       }
                                       val (method, candidate) = sequence[index]
@@ -582,12 +581,10 @@ jobs:
                                               "Método: $method\n" +
                                               "Candidatos verificados: $index\n" +
                                               "Resultado local de demonstração; não é uma senha obtida do Wi-Fi."
-                                          isEnabled = true
                                       } else {
                                           handler.postDelayed({ nextCandidate() }, 8)
                                       }
                                   }
-                                  this.isEnabled = false
                                   nextCandidate()
                               }
                           }
