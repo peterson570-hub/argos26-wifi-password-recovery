@@ -1094,6 +1094,8 @@ jobs:
                   val sae = tokens.any { it.contains("SAE") }
                   val owe = tokens.any { it.contains("OWE") }
                   val eap = tokens.any { it.contains("EAP") }
+                  val psk = tokens.any { it.contains("PSK") }
+                  val ccmp = tokens.any { it.contains("CCMP") }
                   val tkip = tokens.any { it.contains("TKIP") }
                   val wps = tokens.any { it == "WPS" }
 
@@ -1119,7 +1121,13 @@ jobs:
                       SecurityKind.UNKNOWN -> "Não identificada"
                   }
                   val enterprise = eap && kind != SecurityKind.OPEN
-                  val label = if (enterprise) "$base Enterprise" else base
+                  val label = when {
+                      enterprise -> "$base Enterprise"
+                      kind == SecurityKind.WPA2 && psk && ccmp -> "WPA2-Personal (PSK/CCMP)"
+                      kind == SecurityKind.WPA2 && psk && tkip -> "WPA2-Personal (PSK/TKIP)"
+                      kind == SecurityKind.WPA2 && psk -> "WPA2-Personal (PSK)"
+                      else -> base
+                  }
                   return SecurityProfile(kind, enterprise, tkip, wps && !enterprise, label)
               }
 
