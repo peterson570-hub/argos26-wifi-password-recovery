@@ -130,6 +130,7 @@ jobs:
               private var currentTab = 0
 
               private var networks: List<AuditedNetwork> = emptyList()
+              private var selectedNetwork: AuditedNetwork? = null
               private var scanTimeMs = 0L
               private var passwordResult: PasswordResult? = null
 
@@ -199,7 +200,7 @@ jobs:
                   val nav = LinearLayout(this)
                   nav.orientation = LinearLayout.HORIZONTAL
                   nav.setBackgroundColor(Brand.NAVY_SOFT)
-                  listOf("Scanner", "Senhas", "Laboratório", "Relatório").forEachIndexed { index, label ->
+                  listOf("Scanner", "Conexão", "Relatório").forEachIndexed { index, label ->
                       val item = tv(label, 14f, Brand.WHITE, true)
                       item.gravity = Gravity.CENTER
                       item.setPadding(0, dp(14), 0, dp(14))
@@ -217,8 +218,7 @@ jobs:
                   scanStatus = null; scanList = null; pwInput = null
                   val view = when (index) {
                       0 -> buildScannerTab()
-                      1 -> buildPasswordTab()
-                      2 -> buildLabTab()
+                      1 -> buildConnectionTab()
                       else -> buildReportTab()
                   }
                   contentFrame.addView(view)
@@ -263,27 +263,6 @@ jobs:
                   }
                   intro.addView(settingsBtn, lp(t = 8))
 
-                  val connectionCard = card()
-                  connectionCard.addView(tv("Comprovação de conexão", 17f, Brand.NAVY, true))
-                  connectionCard.addView(
-                      tv(
-                          "Depois de conectar o celular a uma rede Wi-Fi, verifique aqui o estado da conexão e o IP local recebido pelo aparelho.",
-                          12f, Brand.MUTED
-                      ), lp(t = 5)
-                  )
-                  val connectionResult = tv("Conexão ainda não verificada.", 14f, Brand.NAVY, true)
-                  connectionCard.addView(connectionResult, lp(t = 8))
-                  connectionCard.addView(
-                      actionButton("ABRIR CONFIGURAÇÕES DE WI-FI", false) {
-                          startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
-                      }, lp(t = 10)
-                  )
-                  connectionCard.addView(
-                      actionButton("VERIFICAR ACESSO E ENDEREÇO IP") {
-                          verifyWifiConnection(connectionResult)
-                      }, lp(t = 8)
-                  )
-
                   val status = tv(
                       if (networks.isEmpty()) "Toque em Escanear para iniciar."
                       else "Redes encontradas: ${networks.size}", 14f, Brand.NAVY, true
@@ -301,10 +280,51 @@ jobs:
                   )
                   val sv = page(intro)
                   val col = sv.getChildAt(0) as LinearLayout
-                  col.addView(connectionCard, lp(t = 12))
                   col.addView(status, lp(t = 16, b = 8))
                   col.addView(list, lp())
                   col.addView(note, lp(t = 12))
+                  return sv
+              }
+
+              private fun buildConnectionTab(): View {
+                  val selected = selectedNetwork
+                  val c = card()
+                  c.addView(tv("Conectar à rede selecionada", 20f, Brand.NAVY, true))
+                  if (selected == null) {
+                      c.addView(
+                          tv("Volte à aba Scanner e toque na rede desejada. Ela aparecerá aqui para iniciar o processo de conexão.", 14f, Brand.MUTED),
+                          lp(t = 8)
+                      )
+                      return page(c)
+                  }
+
+                  c.addView(tv(selected.displaySsid, 18f, Brand.BLUE, true), lp(t = 10))
+                  c.addView(tv("Segurança: ${selected.security.label}", 14f), lp(t = 5))
+                  c.addView(tv("BSSID: ${selected.entry.bssid}", 12f, Brand.MUTED), lp(t = 3))
+                  c.addView(
+                      tv("Banda: ${selected.band} • Canal: ${selected.channel} • Sinal: ${selected.entry.levelDbm} dBm", 13f),
+                      lp(t = 3)
+                  )
+                  c.addView(
+                      tv(
+                          "O Android abrirá as configurações de Wi-Fi para você selecionar esta rede e autenticar. Em WPA2-PSK, será necessário informar uma senha válida. O aplicativo não consegue ler ou deduzir a chave da rede.",
+                          13f, Brand.MUTED
+                      ), lp(t = 12)
+                  )
+                  c.addView(
+                      actionButton("CONECTAR — ABRIR WI-FI DO ANDROID") {
+                          startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                      }, lp(t = 12)
+                  )
+
+                  val connectionResult = tv("Aguardando verificação da conexão.", 14f, Brand.NAVY, true)
+                  c.addView(connectionResult, lp(t = 14))
+                  c.addView(
+                      actionButton("VERIFICAR CONEXÃO E ENDEREÇO IP", false) {
+                          verifyWifiConnection(connectionResult)
+                      }, lp(t = 8)
+                  )
+                  val sv = page(c)
                   return sv
               }
 
@@ -381,21 +401,13 @@ jobs:
                   bar.progressTintList = ColorStateList.valueOf(Brand.BLUE)
                   c.addView(bar, lp(h = dp(8), t = 6))
 
-                  val details = LinearLayout(this)
-                  details.orientation = LinearLayout.VERTICAL
-                  details.visibility = View.GONE
-                  details.addView(tv("Achados", 13f, Brand.NAVY, true), lp(t = 10))
-                  details.addView(bulletList(n.findings.ifEmpty { listOf("Nenhum achado relevante.") }))
-                  details.addView(tv("Recomendações", 13f, Brand.NAVY, true), lp(t = 8))
-                  details.addView(bulletList(n.recommendations))
-                  c.addView(details)
-
-                  val hint = tv("Toque para ver detalhes ▾", 12f, Brand.BLUE, true)
-                  c.addView(hint, lp(t = 8))
+                  c.addView(
+                      tv("Toque nesta rede para selecioná-la e abrir a conexão.", 12f, Brand.BLUE, true),
+                      lp(t = 10)
+                  )
                   c.setOnClickListener {
-                      val open = details.visibility == View.VISIBLE
-                      details.visibility = if (open) View.GONE else View.VISIBLE
-                      hint.text = if (open) "Toque para ver detalhes ▾" else "Ocultar detalhes ▴"
+                      selectedNetwork = n
+                      showTab(1)
                   }
                   return c
               }
