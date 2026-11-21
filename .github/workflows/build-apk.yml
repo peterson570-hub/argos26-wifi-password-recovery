@@ -308,7 +308,7 @@ jobs:
                       val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                       val active = connectivity.activeNetwork
                       if (active == null) {
-                          output.text = "SEM CONEXÃO WI-FI ATIVA\\nConecte-se à rede e verifique novamente."
+                          output.text = "SEM CONEXÃO WI-FI ATIVA\nConecte-se à rede e verifique novamente."
                           return
                       }
 
@@ -329,7 +329,7 @@ jobs:
                       val ip = ipv4?.hostAddress ?: ipv6?.hostAddress
 
                       if (ip == null) {
-                          output.text = "WI-FI CONECTADO, MAS SEM IP LOCAL VÁLIDO\\n" +
+                          output.text = "WI-FI CONECTADO, MAS SEM IP LOCAL VÁLIDO\n" +
                               "O aparelho ainda não apresenta um endereço IP utilizável nessa conexão."
                           return
                       }
@@ -337,9 +337,9 @@ jobs:
                       val internetValidated = capabilities.hasCapability(
                           NetworkCapabilities.NET_CAPABILITY_VALIDATED
                       )
-                      output.text = "CONEXÃO WI-FI ATIVA\\n" +
-                          "IP local: $ip\\n" +
-                          "Internet validada: ${if (internetValidated) "sim" else "não / rede sem validação externa"}\\n" +
+                      output.text = "CONEXÃO WI-FI ATIVA\n" +
+                          "IP local: $ip\n" +
+                          "Internet validada: ${if (internetValidated) "sim" else "não / rede sem validação externa"}\n" +
                           "Verificação feita pelo Android. O endereço IP confirma a configuração de rede, " +
                           "mas não identifica por si só como a autenticação foi realizada."
                   } catch (e: SecurityException) {
