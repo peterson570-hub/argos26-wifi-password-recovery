@@ -202,7 +202,7 @@ jobs:
                   val nav = LinearLayout(this)
                   nav.orientation = LinearLayout.HORIZONTAL
                   nav.setBackgroundColor(Brand.NAVY_SOFT)
-                  listOf("Scanner", "Conexão", "Relatório").forEachIndexed { index, label ->
+                  listOf("Scanner", "Conexão", "Senha", "Laboratório", "Relatório").forEachIndexed { index, label ->
                       val item = tv(label, 14f, Brand.WHITE, true)
                       item.gravity = Gravity.CENTER
                       item.setPadding(0, dp(14), 0, dp(14))
@@ -221,6 +221,8 @@ jobs:
                   val view = when (index) {
                       0 -> buildScannerTab()
                       1 -> buildConnectionTab()
+                      2 -> buildPasswordTab()
+                      3 -> buildLabTab()
                       else -> buildReportTab()
                   }
                   contentFrame.addView(view)
