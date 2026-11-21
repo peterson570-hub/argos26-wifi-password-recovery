@@ -507,7 +507,7 @@ jobs:
                   val c = card()
                   c.addView(tv("Laboratório de busca offline", 20f, Brand.NAVY, true))
                   c.addView(tv(
-                      "Demonstração acadêmica: compara candidatos localmente com uma senha de referência fornecida para o experimento. Não se conecta ao roteador nem testa redes reais.",
+                      "Demonstração acadêmica: compara candidatos localmente com uma referência informada para o experimento. Não se conecta ao roteador nem testa redes reais.",
                       13f, Brand.MUTED
                   ), lp(t = 6))
 
@@ -518,7 +518,7 @@ jobs:
                   c.addView(consent, lp(t = 10))
 
                   val reference = EditText(this)
-                  reference.hint = "Senha de referência do laboratório"
+                  reference.hint = "Referência do laboratório (3 dígitos para Random)"
                   reference.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                   reference.setSingleLine()
                   c.addView(reference, lp(t = 6))
@@ -548,43 +548,57 @@ jobs:
                           !consent.isChecked -> Toast.makeText(
                               this, "Confirme o uso da referência do laboratório.", Toast.LENGTH_LONG
                           ).show()
-                          secret.isEmpty() -> result.text = "Informe a senha de referência do experimento."
-                          dictionary.isEmpty() -> result.text = "Informe pelo menos um candidato no Dictionary."
+                          secret.isEmpty() -> result.text = "Informe a referência do experimento."
                           else -> {
-                              // Dictionary percorre na ordem digitada. Random percorre a mesma
-                              // lista em ordem embaralhada. Ambos são testes locais de comparação.
-                              val sequence = dictionary.map { "Dictionary" to it } +
-                                  dictionary.shuffled().map { "Random" to it }
+                              // Dictionary percorre os itens digitados. Se não houver
+                              // correspondência e a referência tiver 3 dígitos, Random
+                              // percorre 000..999 em ordem aleatória. Tudo é local/offline.
+                              val dictionarySequence = dictionary.map { Pair("Dictionary", it) }
+                              val randomSequence = if (
+                                  secret.length == 3 && secret.all { it.isDigit() }
+                              ) {
+                                  (0..999).map { Pair("Random", "%03d".format(it)) }.shuffled()
+                              } else {
+                                  emptyList()
+                              }
+                              val sequence = dictionarySequence + randomSequence
                               progress.progress = 0
                               result.text = "Executando comparação offline…"
-                              runButton@ run {
-                                  // Processa um candidato por vez para atualizar a barra sem
-                                  // bloquear a interface. Nenhuma API de Wi-Fi é chamada.
-                                  var index = 0
-                                  var finished = false
-                                  fun nextCandidate() {
-                                      if (finished) return
-                                      if (index >= sequence.size) {
-                                          finished = true
-                                          result.text = "NENHUMA CORRESPONDÊNCIA\n" +
-                                              "Candidatos verificados: ${sequence.size}\n" +
-                                              "A referência não apareceu na lista fornecida. Nenhuma rede foi acessada."
-                                          return
-                                      }
-                                      val (method, candidate) = sequence[index]
-                                      index += 1
-                                      progress.progress = (index * 100 / sequence.size).coerceIn(0, 100)
-                                      if (candidate == secret) {
-                                          finished = true
-                                          result.text = "SENHA ENCONTRADA NO LABORATÓRIO\n" +
-                                              "Correspondência da referência: $candidate\n" +
-                                              "Método: $method\n" +
-                                              "Candidatos verificados: $index\n" +
-                                              "Resultado local de demonstração; não é uma senha obtida do Wi-Fi."
-                                      } else {
-                                          handler.postDelayed({ nextCandidate() }, 8)
-                                      }
+                              var index = 0
+                              var finished = false
+
+                              fun nextCandidate() {
+                                  if (finished) return
+                                  if (index >= sequence.size) {
+                                      finished = true
+                                      result.text = "NENHUMA CORRESPONDÊNCIA NESTA EXECUÇÃO\n" +
+                                          "Candidatos verificados: " + sequence.size + "\n" +
+                                          (if (randomSequence.isEmpty())
+                                              "Random não executado: informe uma referência numérica de 3 dígitos para esse modo.\n"
+                                          else "Dictionary e Random concluídos.\n") +
+                                          "Nenhuma rede Wi-Fi foi acessada."
+                                      return
                                   }
+
+                                  val pair = sequence[index]
+                                  val method = pair.first
+                                  val candidate = pair.second
+                                  index += 1
+                                  progress.progress = (index * 100 / sequence.size).coerceIn(0, 100)
+                                  if (candidate == secret) {
+                                      finished = true
+                                      result.text = "SENHA ENCONTRADA NO LABORATÓRIO\n" +
+                                          "Correspondência da referência: " + candidate + "\n" +
+                                          "Método: " + method + "\n" +
+                                          "Candidatos verificados: " + index + "\n" +
+                                          "Resultado de comparação offline; não é uma senha obtida do Wi-Fi."
+                                  } else {
+                                      handler.postDelayed({ nextCandidate() }, 8)
+                                  }
+                              }
+                              if (sequence.isEmpty()) {
+                                  result.text = "Informe ao menos um candidato no Dictionary ou use uma referência numérica de 3 dígitos para Random."
+                              } else {
                                   nextCandidate()
                               }
                           }
@@ -593,9 +607,9 @@ jobs:
                   c.addView(runButton, lp(t = 12))
 
                   val note = card()
-                  note.addView(tv("Como funciona o modo Random", 14f, Brand.NAVY, true))
+                  note.addView(tv("Como funcionam os dois métodos", 14f, Brand.NAVY, true))
                   note.addView(tv(
-                      "O modo Random embaralha a ordem dos candidatos fornecidos e repete a comparação offline. Ele demonstra uma estratégia de busca, mas não gera senhas de Wi-Fi, não testa autenticação e não descobre a senha de uma rede desconhecida.",
+                      "Dictionary: compara a referência com cada linha informada. Random: se a referência tiver exatamente 3 dígitos, testa as combinações de 000 a 999 em ordem aleatória. O modo é limitado e serve apenas para demonstrar busca offline; não testa autenticação nem descobre senhas de redes.",
                       12f, Brand.MUTED
                   ), lp(t = 4))
                   val sv = page(c)
@@ -1299,7 +1313,7 @@ jobs:
           ## Módulos
           - Scanner passivo de redes próximas e classificação básica de segurança.
           - Análise local da força de uma senha digitada pelo usuário.
-          - Laboratório offline Dictionary/Random: demonstra comparação de candidatos com uma senha de referência fornecida para o experimento. Não autentica no roteador e não recupera senhas de redes desconhecidas.
+          - Laboratório offline Dictionary/Random: Dictionary compara palavras informadas; Random testa combinações numéricas de 3 dígitos em ordem aleatória quando a referência tem esse formato. Não autentica no roteador e não recupera senhas de redes desconhecidas.
           - Relatório compartilhável.
 
           ## Compilação
