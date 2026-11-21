@@ -506,10 +506,13 @@ jobs:
               private fun buildLabTab(): View {
                   val c = card()
                   c.addView(tv("Laboratório de busca offline", 20f, Brand.NAVY, true))
-                  c.addView(tv("Demonstração acadêmica: compara candidatos com uma senha de referência informada pelo responsável pelo laboratório. Não se conecta ao roteador nem testa redes reais.", 13f, Brand.MUTED), lp(t = 6))
+                  c.addView(tv(
+                      "Demonstração acadêmica: compara candidatos localmente com uma senha de referência do experimento. Não se conecta ao roteador nem testa redes reais.",
+                      13f, Brand.MUTED
+                  ), lp(t = 6))
 
                   val consent = CheckBox(this)
-                  consent.text = "Confirmo que esta senha é minha ou foi fornecida para o experimento"
+                  consent.text = "Confirmo que a senha de referência foi fornecida para este experimento"
                   consent.textSize = 13f
                   consent.setTextColor(Brand.TEXT)
                   c.addView(consent, lp(t = 10))
@@ -521,44 +524,61 @@ jobs:
                   c.addView(reference, lp(t = 6))
 
                   val candidates = EditText(this)
-                  candidates.hint = "Dictionary: um candidato por linha\nEx.: senha123\nArgos@2026\nMinhaRede2026"
+                  candidates.hint = "Dictionary opcional: um candidato por linha"
                   candidates.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
                   candidates.minLines = 4
                   candidates.gravity = Gravity.TOP
                   c.addView(candidates, lp(t = 8))
 
-                  val result = tv("Aguardando experimento.", 14f, Brand.NAVY, true)
-                  c.addView(actionButton("EXECUTAR DICTIONARY") {
+                  val result = tv("Pronto para executar o experimento.", 14f, Brand.NAVY, true)
+                  val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  progress.max = 100
+                  progress.progress = 0
+                  progress.progressTintList = ColorStateList.valueOf(Brand.BLUE)
+                  c.addView(progress, lp(h = dp(8), t = 12))
+                  c.addView(result, lp(t = 10))
+
+                  c.addView(actionButton("EXECUTAR TESTE AUTOMÁTICO", true) {
+                      val secret = reference.text.toString()
                       if (!consent.isChecked) {
-                          Toast.makeText(this, "Confirme a autorização do laboratório.", Toast.LENGTH_LONG).show()
+                          Toast.makeText(this, "Confirme o uso da referência do laboratório.", Toast.LENGTH_LONG).show()
+                      } else if (secret.isEmpty()) {
+                          result.text = "Informe a senha de referência do experimento."
                       } else {
-                          val secret = reference.text.toString()
-                          val words = candidates.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-                          if (secret.isEmpty() || words.isEmpty()) {
-                              result.text = "Informe a senha de referência e pelo menos um candidato."
+                          val dictionary = candidates.text.toString().lines()
+                              .map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+                          val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+                          val generatedRandomCandidates = (1..250).map {
+                              (1..secret.length.coerceIn(1, 4)).map { alphabet.random() }.joinToString("")
+                          }
+                          // Random gera candidatos limitados para demonstrar o método offline.
+                          // Não utiliza interfaces Wi-Fi nem realiza autenticação.
+                          val allCandidates = (dictionary + generatedRandomCandidates).distinct()
+                          progress.progress = 0
+                          result.text = "Executando comparação local…"
+                          val foundAt = allCandidates.indexOf(secret)
+                          progress.progress = 100
+                          result.text = if (foundAt >= 0) {
+                              "CORRESPONDÊNCIA ENCONTRADA NO LABORATÓRIO\n" +
+                                  "Senha de referência: $secret\n" +
+                                  "Candidatos verificados: ${foundAt + 1}\n" +
+                                  "Origem: ${if (foundAt < dictionary.size) "Dictionary" else "Random"}\n" +
+                                  "Observação: esta é uma comparação offline com a referência informada; não é uma senha recuperada do Wi-Fi."
                           } else {
-                              val found = words.firstOrNull { it == secret }
-                              result.text = if (found != null) "CORRESPONDÊNCIA ENCONTRADA\nSenha: $found\nCandidatos verificados: ${words.indexOf(found) + 1}" else "Nenhuma correspondência.\nCandidatos verificados: ${words.size}"
+                              "NENHUMA CORRESPONDÊNCIA NESTA EXECUÇÃO\n" +
+                                  "Candidatos verificados: ${allCandidates.size}\n" +
+                                  "A senha de referência permaneceu desconhecida para os candidatos gerados.\n" +
+                                  "Nenhuma rede Wi-Fi foi acessada."
                           }
                       }
-                  }, lp(t = 10))
-                  c.addView(result, lp(t = 12))
-
-                  val randomTitle = tv("Modo Random — demonstração", 16f, Brand.NAVY, true)
-                  c.addView(randomTitle, lp(t = 18))
-                  val randomInfo = tv("Gera uma senha aleatória curta para o laboratório e permite demonstrar a comparação offline. Não representa uma tentativa contra o Wi-Fi.", 12f, Brand.MUTED)
-                  c.addView(randomInfo, lp(t = 4))
-                  c.addView(actionButton("GERAR SENHA DE TESTE", false) {
-                      val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
-                      val generated = (1..6).map { alphabet.random() }.joinToString("")
-                      reference.setText(generated)
-                      candidates.setText(generated + "\nSenhaErrada123\nArgos2026")
-                      result.text = "Senha de laboratório gerada e incluída no conjunto de candidatos. Execute o Dictionary para confirmar a correspondência."
-                  }, lp(t = 8))
+                  }, lp(t = 12))
 
                   val note = card()
-                  note.addView(tv("Limitação técnica", 14f, Brand.NAVY, true))
-                  note.addView(tv("O Android não entrega a senha de uma rede desconhecida a aplicativos comuns. Este módulo demonstra busca e correspondência offline com uma referência conhecida; não descobre credenciais de um ponto de acesso real.", 12f, Brand.MUTED), lp(t = 4))
+                  note.addView(tv("Como interpretar o resultado", 14f, Brand.NAVY, true))
+                  note.addView(tv(
+                      "O teste é um exercício local de comparação de texto. O conjunto Random é limitado e aleatório; não representa força bruta de Wi-Fi nem permite descobrir credenciais de uma rede desconhecida.",
+                      12f, Brand.MUTED
+                  ), lp(t = 4))
                   val sv = page(c)
                   (sv.getChildAt(0) as LinearLayout).addView(note, lp(t = 12))
                   return sv
