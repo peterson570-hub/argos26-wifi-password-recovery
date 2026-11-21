@@ -131,6 +131,8 @@ jobs:
 
               private var networks: List<AuditedNetwork> = emptyList()
               private var selectedNetwork: AuditedNetwork? = null
+              private var awaitingWifiSettingsReturn = false
+              private var connectionStatusView: TextView? = null
               private var scanTimeMs = 0L
               private var passwordResult: PasswordResult? = null
 
@@ -292,7 +294,7 @@ jobs:
                   c.addView(tv("Conectar à rede selecionada", 20f, Brand.NAVY, true))
                   if (selected == null) {
                       c.addView(
-                          tv("Volte à aba Scanner e toque na rede desejada. Ela aparecerá aqui para iniciar o processo de conexão.", 14f, Brand.MUTED),
+                          tv("Volte ao Scanner e toque na rede desejada.", 14f, Brand.MUTED),
                           lp(t = 8)
                       )
                       return page(c)
@@ -307,25 +309,22 @@ jobs:
                   )
                   c.addView(
                       tv(
-                          "O Android abrirá as configurações de Wi-Fi para você selecionar esta rede e autenticar. Em WPA2-PSK, será necessário informar uma senha válida. O aplicativo não consegue ler ou deduzir a chave da rede.",
+                          "Toque em INICIAR para abrir as configurações Wi-Fi do Android. Se a rede exigir WPA2-PSK, o Android solicitará uma credencial válida. Ao voltar ao ARGOS26, o aplicativo verificará automaticamente a conexão e o IP.",
                           13f, Brand.MUTED
                       ), lp(t = 12)
                   )
+
+                  val connectionResult = tv("Aguardando início.", 14f, Brand.NAVY, true)
+                  connectionStatusView = connectionResult
+                  c.addView(connectionResult, lp(t = 14))
                   c.addView(
-                      actionButton("CONECTAR — ABRIR WI-FI DO ANDROID") {
+                      actionButton("INICIAR") {
+                          awaitingWifiSettingsReturn = true
+                          connectionResult.text = "Abra a rede selecionada nas configurações do Android. Após conectar, volte a este aplicativo."
                           startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
                       }, lp(t = 12)
                   )
-
-                  val connectionResult = tv("Aguardando verificação da conexão.", 14f, Brand.NAVY, true)
-                  c.addView(connectionResult, lp(t = 14))
-                  c.addView(
-                      actionButton("VERIFICAR CONEXÃO E ENDEREÇO IP", false) {
-                          verifyWifiConnection(connectionResult)
-                      }, lp(t = 8)
-                  )
-                  val sv = page(c)
-                  return sv
+                  return page(c)
               }
 
               private fun verifyWifiConnection(output: TextView) {
@@ -743,6 +742,16 @@ jobs:
               }
 
               // ---------- Ciclo de vida ----------
+
+              override fun onResume() {
+                  super.onResume()
+                  if (awaitingWifiSettingsReturn) {
+                      awaitingWifiSettingsReturn = false
+                      handler.postDelayed({
+                          connectionStatusView?.let { verifyWifiConnection(it) }
+                      }, 700)
+                  }
+              }
 
               override fun onStop() {
                   // Privacidade: não deixa a senha digitada na tela ao sair do app.
